@@ -1021,7 +1021,7 @@ static int pin_init(void)
 	k_sleep(K_SECONDS(10));
 #endif
 
-	modem_pin_config(&mctx, MDM_POWER, false);
+	modem_pin_config(&mctx, MDM_POWER, true);
 
 	LOG_INF("... Done!");
 
