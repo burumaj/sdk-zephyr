@@ -35,7 +35,7 @@ LOG_MODULE_REGISTER(hawkbit, CONFIG_HAWKBIT_LOG_LEVEL);
 
 #include "mbedtls/md.h"
 
-#if defined(CONFIG_NET_SOCKETS_SOCKOPT_TLS)
+#if defined(CONFIG_NET_SOCKETS_SOCKOPT_TLS) || defined(CONFIG_NET_SOCKETS_OFFLOAD_TLS)
 #define CA_CERTIFICATE_TAG 1
 #include <net/tls_credentials.h>
 #endif
@@ -229,11 +229,13 @@ static const struct json_obj_descr json_dep_fbk_descr[] = {
 static bool start_http_client(void)
 {
 	int ret = -1;
+	int err;
 	struct addrinfo *addr;
-	struct addrinfo hints;
+	struct addrinfo hints = {};
 	int resolve_attempts = 10;
+	int port = atoi(CONFIG_HAWKBIT_PORT);
 
-#if defined(CONFIG_NET_SOCKETS_SOCKOPT_TLS)
+#if defined(CONFIG_NET_SOCKETS_SOCKOPT_TLS) || defined(CONFIG_NET_SOCKETS_OFFLOAD_TLS)
 	int protocol = IPPROTO_TLS_1_2;
 #else
 	int protocol = IPPROTO_TCP;
@@ -268,7 +270,7 @@ static bool start_http_client(void)
 		goto err;
 	}
 
-#if defined(CONFIG_NET_SOCKETS_SOCKOPT_TLS)
+#if defined(CONFIG_NET_SOCKETS_SOCKOPT_TLS) || defined(CONFIG_NET_SOCKETS_OFFLOAD_TLS)
 	sec_tag_t sec_tag_opt[] = {
 		CA_CERTIFICATE_TAG,
 	};
@@ -286,8 +288,10 @@ static bool start_http_client(void)
 	}
 #endif
 
-	if (connect(hb_context.sock, addr->ai_addr, addr->ai_addrlen) < 0) {
-		LOG_ERR("Failed to connect to server");
+
+	err = connect(hb_context.sock, addr->ai_addr, addr->ai_addrlen);
+	if ( err < 0) {
+		LOG_ERR("Failed to connect to server: err %d, errno %d", err, errno);
 		goto err_sock;
 	}
 
@@ -576,12 +580,18 @@ static int hawkbit_parse_deployment(struct hawkbit_dep_res *res,
 static void hawkbit_dump_base(struct hawkbit_ctl_res *r)
 {
 	LOG_DBG("config.polling.sleep=%s", log_strdup(r->config.polling.sleep));
-	LOG_DBG("_links.deploymentBase.href=%s",
-		log_strdup(r->_links.deploymentBase.href));
-	LOG_DBG("_links.configData.href=%s",
-		log_strdup(r->_links.configData.href));
-	LOG_DBG("_links.cancelAction.href=%s",
-		log_strdup(r->_links.cancelAction.href));
+	if(r->_links.deploymentBase.href != NULL){
+		LOG_DBG("_links.deploymentBase.href=%s",
+			log_strdup(r->_links.deploymentBase.href));
+	}
+	if(r->_links.configData.href != NULL){
+		LOG_DBG("_links.configData.href=%s",
+			log_strdup(r->_links.configData.href));
+	}
+	if(r->_links.cancelAction.href != NULL){
+		LOG_DBG("_links.cancelAction.href=%s",
+			log_strdup(r->_links.cancelAction.href));
+	}
 }
 
 static void hawkbit_dump_deployment(struct hawkbit_dep_res *d)
@@ -928,6 +938,7 @@ static bool send_request(enum http_method method,
 	hb_context.http_req.response = response_cb;
 	hb_context.http_req.recv_buf = hb_context.recv_buf_tcp;
 	hb_context.http_req.recv_buf_len = sizeof(hb_context.recv_buf_tcp);
+
 #ifndef CONFIG_HAWKBIT_DDI_NO_SECURITY
 	hb_context.http_req.header_fields = (const char **)headers;
 #endif
