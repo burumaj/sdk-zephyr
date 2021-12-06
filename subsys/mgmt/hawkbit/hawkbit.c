@@ -49,6 +49,7 @@ LOG_MODULE_REGISTER(hawkbit, CONFIG_HAWKBIT_LOG_LEVEL);
 #define DEPLOYMENT_BASE_SIZE 50
 #define RESPONSE_BUFFER_SIZE 1100
 #define HAWKBIT_RECV_TIMEOUT (300 * MSEC_PER_SEC)
+#define HAWKBIT_DOWNLOAD_PART_SIZE KB(CONFIG_HAWKBIT_DOWNLOAD_PART_SIZE)
 
 #define SLOT1_SIZE FLASH_AREA_SIZE(image_1)
 #define HTTP_HEADER_CONTENT_TYPE_JSON "application/json;charset=UTF-8"
@@ -69,6 +70,8 @@ struct hawkbit_download {
 	int download_progress;
 	size_t downloaded_size;
 	size_t http_content_size;
+	size_t firmware_size;
+	int parts_downloaded;
 	uint8_t file_hash[SHA256_HASH_SIZE];
 };
 
@@ -255,8 +258,9 @@ static bool start_http_client(void)
 	}
 #endif
 
-	if (connect(hb_context.sock, addr->ai_addr, addr->ai_addrlen) < 0) {
-		LOG_ERR("Failed to connect to server");
+	err = connect(hb_context.sock, addr->ai_addr, addr->ai_addrlen);
+	if (err < 0) {
+		LOG_ERR("Failed to connect to server: err %d, errno %d", err, errno);
 		goto err_sock;
 	}
 
@@ -504,6 +508,8 @@ static int hawkbit_parse_deployment(struct hawkbit_dep_res *res, int32_t *json_a
 		return -ENOSPC;
 	}
 
+	hb_context.dl.firmware_size = size;
+
 	/*
 	 * Find the download-http href. We only support the DEFAULT
 	 * tenant on the same hawkbit server.
@@ -572,8 +578,8 @@ int hawkbit_init(void)
 	struct flash_pages_info info;
 	int32_t action_id;
 
-	fs.flash_device = DEVICE_DT_GET(FLASH_NODE);
-	if (!device_is_ready(fs.flash_device)) {
+	fs.flash_device = device_get_binding(PM_SETTINGS_STORAGE_DEV_NAME);
+	if (!device_is_ready(flash_dev)) {
 		LOG_ERR("Flash device not ready");
 		return -ENODEV;
 	}
@@ -633,6 +639,48 @@ static int enum_for_http_req_string(char *userdata)
 	}
 
 	return 0;
+}
+
+static ssize_t sendall(int sock, const void *buf, size_t len)
+{
+	while (len) {
+		ssize_t out_len = send(sock, buf, len, 0);
+
+		if (out_len < 0) {
+			return -errno;
+		}
+
+		buf = (const char *)buf + out_len;
+		len -= out_len;
+	}
+
+	return 0;
+}
+
+static int header_cb(int sock, struct http_request *req, void *userdata)
+{
+	int ret = 0;
+	int type = enum_for_http_req_string(userdata);
+	static char *range_header_format = "Range: bytes=%d-%d" HTTP_CRLF;
+
+	if (type == HAWKBIT_DOWNLOAD_PART) {
+		char header[64];
+		int header_len;
+
+		header_len =
+			snprintf(header, sizeof(header), range_header_format,
+				 hb_context.dl.downloaded_size,
+				 hb_context.dl.downloaded_size + HAWKBIT_DOWNLOAD_PART_SIZE - 1);
+
+		ret = sendall(sock, header, header_len);
+		if (ret != 0) {
+			return ret;
+		}
+
+		return header_len;
+	}
+
+	return ret;
 }
 
 static void response_cb(struct http_response *rsp, enum http_final_call final_data, void *userdata)
@@ -749,9 +797,13 @@ static void response_cb(struct http_response *rsp, enum http_final_call final_da
 			hb_context.dl.http_content_size = rsp->content_length;
 		}
 
-		if (rsp->body_found) {
-			body_data = rsp->body_frag_start;
-			body_len = rsp->body_frag_len;
+		if (body_data != NULL) {
+			ret = mbedtls_md_update(&hb_context.dl.hash_ctx, body_data, body_len);
+			if (ret != 0) {
+				LOG_ERR("mbedTLS md update error: %d", ret);
+				hb_context.code_status = HAWKBIT_DOWNLOAD_ERROR;
+				break;
+			}
 
 			ret = flash_img_buffered_write(&hb_context.flash_ctx, body_data, body_len,
 						       final_data == HTTP_DATA_FINAL);
@@ -772,6 +824,70 @@ static void response_cb(struct http_response *rsp, enum http_final_call final_da
 		}
 
 		if (final_data == HTTP_DATA_FINAL) {
+			hb_context.final_data_received = true;
+		}
+
+		break;
+	case HAWKBIT_DOWNLOAD_PART:
+		if (rsp->http_status_code != 206) {
+			hb_context.code_status = HAWKBIT_DOWNLOAD_ERROR;
+			break;
+		}
+
+		if (hb_context.dl.http_content_size == 0) {
+			body_data = rsp->body_start;
+			body_len = rsp->data_len;
+			/*
+			 * subtract the size of the HTTP header from body_len
+			 */
+			body_len -= (rsp->body_start - rsp->recv_buf);
+			hb_context.dl.http_content_size = rsp->content_length;
+		} else {
+			/*
+			 * more general case where body data is set, but no need
+			 * to take the HTTP header into account
+			 */
+			body_data = rsp->body_start;
+			body_len = rsp->data_len;
+		}
+
+		if ((rsp->body_found == 1) && (body_data == NULL)) {
+			body_data = rsp->recv_buf;
+			body_len = rsp->data_len;
+		}
+
+		LOG_DBG("Downloaded %d bytes", hb_context.dl.downloaded_size);
+		LOG_DBG("Content_lenght: %d", body_len);
+
+		if (body_data != NULL) {
+			ret = mbedtls_md_update(&hb_context.dl.hash_ctx, body_data, body_len);
+			if (ret != 0) {
+				LOG_ERR("mbedTLS md update error: %d", ret);
+				hb_context.code_status = HAWKBIT_DOWNLOAD_ERROR;
+				break;
+			}
+
+			ret = flash_img_buffered_write(&hb_context.flash_ctx, body_data, body_len,
+						       (hb_context.dl.downloaded_size + body_len) >=
+							       hb_context.dl.firmware_size &&
+							       final_data == HTTP_DATA_FINAL);
+			if (ret < 0) {
+				LOG_ERR("Flash write error: %d", ret);
+				hb_context.code_status = HAWKBIT_DOWNLOAD_ERROR;
+				break;
+			}
+		}
+
+		hb_context.dl.downloaded_size += body_len;
+
+		downloaded = hb_context.dl.downloaded_size * 100 / hb_context.dl.firmware_size;
+
+		if (downloaded > hb_context.dl.download_progress) {
+			hb_context.dl.download_progress = downloaded;
+			LOG_DBG("Download percentage: %d%% ", hb_context.dl.download_progress);
+		}
+
+		if (hb_context.dl.downloaded_size >= hb_context.dl.firmware_size) {
 			hb_context.final_data_received = true;
 		}
 
@@ -949,6 +1065,27 @@ static bool send_request(enum http_method method, enum hawkbit_http_request type
 		}
 
 		break;
+
+	case HAWKBIT_DOWNLOAD_PART:
+		hb_context.http_req.optional_headers_cb = header_cb;
+		hb_context.code_status = HAWKBIT_OK;
+
+		do {
+			hb_context.dl.http_content_size = 0;
+			ret = http_client_req(hb_context.sock, &hb_context.http_req,
+					      HAWKBIT_RECV_TIMEOUT, "HAWKBIT_DOWNLOAD_PART");
+			if (ret < 0) {
+				LOG_ERR("Unable to send HTTP request (HAWKBIT_DOWNLOAD_PART): %d",
+					ret);
+				return false;
+			}
+			if (hb_context.code_status == HAWKBIT_NETWORKING_ERROR) {
+				return false;
+			}
+			hb_context.dl.parts_downloaded++;
+		} while (hb_context.dl.downloaded_size < hb_context.dl.firmware_size);
+
+		break;
 	}
 
 	return true;
@@ -960,6 +1097,7 @@ enum hawkbit_response hawkbit_probe(void)
 	int32_t action_id;
 	int32_t file_size = 0;
 	struct flash_img_check fic;
+	enum hawkbit_http_request download_strategy;
 	char device_id[DEVICE_ID_HEX_MAX_SIZE] = { 0 },
 	     cancel_base[CANCEL_BASE_SIZE] = { 0 },
 	     download_http[DOWNLOAD_HTTP_SIZE] = { 0 },
@@ -1003,8 +1141,8 @@ enum hawkbit_response hawkbit_probe(void)
 	hb_context.dl.http_content_size = 0;
 	hb_context.dl.downloaded_size = 0;
 	hb_context.url_buffer_size = URL_BUFFER_SIZE;
-	snprintk(hb_context.url_buffer, hb_context.url_buffer_size, "%s/%s-%s",
-		 HAWKBIT_JSON_URL, CONFIG_BOARD, device_id);
+	snprintk(hb_context.url_buffer, hb_context.url_buffer_size, "%s/%s-%s", HAWKBIT_JSON_URL,
+		 CONFIG_BOARD, device_id);
 	memset(&hawkbit_results.base, 0, sizeof(hawkbit_results.base));
 
 	if (!send_request(HTTP_GET, HAWKBIT_PROBE, HAWKBIT_STATUS_FINISHED_NONE,
@@ -1126,6 +1264,7 @@ enum hawkbit_response hawkbit_probe(void)
 
 	LOG_INF("Ready to install update");
 
+	hb_context.dl.downloaded_size = 0;
 	hb_context.dl.http_content_size = 0;
 	memset(hb_context.url_buffer, 0, sizeof(hb_context.url_buffer));
 	hb_context.url_buffer_size = URL_BUFFER_SIZE;
@@ -1134,9 +1273,16 @@ enum hawkbit_response hawkbit_probe(void)
 
 	flash_img_init(&hb_context.flash_ctx);
 
-	ret = (int)send_request(HTTP_GET, HAWKBIT_DOWNLOAD,
-			  HAWKBIT_STATUS_FINISHED_NONE,
-			  HAWKBIT_STATUS_EXEC_NONE);
+
+	if (IS_ENABLED(CONFIG_HAWKBIT_DOWNLOAD_PART)) {
+		download_strategy = HAWKBIT_DOWNLOAD_PART;
+	} else {
+		download_strategy = HAWKBIT_DOWNLOAD;
+	}
+
+	ret = (int)send_request(HTTP_GET, download_strategy,
+				HAWKBIT_STATUS_FINISHED_NONE,
+				HAWKBIT_STATUS_EXEC_NONE);
 
 	if (!ret) {
 		LOG_ERR("Send request failed (HAWKBIT_DOWNLOAD): %d", ret);
