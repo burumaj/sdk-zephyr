@@ -35,7 +35,7 @@ LOG_MODULE_REGISTER(hawkbit, CONFIG_HAWKBIT_LOG_LEVEL);
 
 #include "mbedtls/md.h"
 
-#if defined(CONFIG_NET_SOCKETS_SOCKOPT_TLS)
+#if defined(CONFIG_NET_SOCKETS_SOCKOPT_TLS) || defined(CONFIG_NET_SOCKETS_OFFLOAD_TLS)
 #define CA_CERTIFICATE_TAG 1
 #include <net/tls_credentials.h>
 #endif
@@ -207,10 +207,10 @@ static bool start_http_client(void)
 {
 	int ret = -1;
 	struct addrinfo *addr;
-	struct addrinfo hints;
+	struct addrinfo hints = {};
 	int resolve_attempts = 10;
 
-#if defined(CONFIG_NET_SOCKETS_SOCKOPT_TLS)
+#if defined(CONFIG_NET_SOCKETS_SOCKOPT_TLS) || defined(CONFIG_NET_SOCKETS_OFFLOAD_TLS)
 	int protocol = IPPROTO_TLS_1_2;
 #else
 	int protocol = IPPROTO_TCP;
@@ -244,7 +244,7 @@ static bool start_http_client(void)
 		goto err;
 	}
 
-#if defined(CONFIG_NET_SOCKETS_SOCKOPT_TLS)
+#if defined(CONFIG_NET_SOCKETS_SOCKOPT_TLS) || defined(CONFIG_NET_SOCKETS_OFFLOAD_TLS)
 	sec_tag_t sec_tag_opt[] = {
 		CA_CERTIFICATE_TAG,
 	};
@@ -261,9 +261,9 @@ static bool start_http_client(void)
 	}
 #endif
 
-	err = connect(hb_context.sock, addr->ai_addr, addr->ai_addrlen);
-	if (err < 0) {
-		LOG_ERR("Failed to connect to server: err %d, errno %d", err, errno);
+	ret = connect(hb_context.sock, addr->ai_addr, addr->ai_addrlen);
+	if (ret < 0) {
+		LOG_ERR("Failed to connect to server: err %d, errno %d", ret, errno);
 		goto err_sock;
 	}
 
