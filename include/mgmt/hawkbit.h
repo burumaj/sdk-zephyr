@@ -35,6 +35,8 @@ enum hawkbit_response {
 	HAWKBIT_PROBE_IN_PROGRESS,
 };
 
+typedef void(*hawkbit_autohandler_cb_t)(enum hawkbit_response);
+
 /**
  * @brief Init the flash partition
  *
@@ -49,6 +51,18 @@ int hawkbit_init(void);
  * in pre-determined time intervals.
  */
 void hawkbit_autohandler(void);
+
+/**
+ * @brief Set a callback function to be run after a probe of the server.
+ *
+ * @details Set the callback function to be run after a probe of the
+ * hawkBit server. If the handler is not set or this function is NULL,
+ * the default autohandler is used.
+ *
+ * @param cb the function to be called after hawkbit_probe is called.
+ *
+ */
+void hawkbit_set_probe_cb(hawkbit_autohandler_cb_t cb);
 
 /**
  * @brief The Hawkbit probe verify if there is some update to be performed.

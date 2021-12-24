@@ -78,6 +78,9 @@ struct hawkbit_download {
 	uint8_t file_hash[SHA256_HASH_SIZE];
 };
 
+static hawkbit_autohandler_cb_t handler_cb;
+
+
 static struct hawkbit_context {
 	int sock;
 	int32_t action_id;
@@ -630,6 +633,7 @@ int hawkbit_init(void)
 		}
 	}
 
+	handler_cb = NULL;
 	k_sem_init(&probe_sem, 1, 1);
 
 	return ret;
@@ -1402,9 +1406,14 @@ error:
 	return hb_context.code_status;
 }
 
-static void autohandler(struct k_work *work)
+void hawkbit_set_probe_cb(hawkbit_autohandler_cb_t cb)
 {
-	switch (hawkbit_probe()) {
+	handler_cb = cb;
+}
+
+static void default_autohandler(enum hawkbit_response response)
+{
+	switch (response) {
 	case HAWKBIT_UNCONFIRMED_IMAGE:
 		LOG_ERR("Image is unconfirmed");
 		LOG_ERR("Rebooting to previous confirmed image");
@@ -1445,6 +1454,17 @@ static void autohandler(struct k_work *work)
 	case HAWKBIT_PROBE_IN_PROGRESS:
 		LOG_INF("Hawkbit is already running");
 		break;
+	}
+}
+
+static void autohandler(struct k_work *work)
+{
+	enum hawkbit_response resp = hawkbit_probe();
+
+	if(handler_cb != NULL) {
+		handler_cb(resp);
+	} else {
+		default_autohandler(resp);
 	}
 
 	k_work_reschedule(&hawkbit_work_handle, K_MSEC(poll_sleep));
