@@ -33,6 +33,8 @@ LOG_MODULE_REGISTER(hawkbit, CONFIG_HAWKBIT_LOG_LEVEL);
 #include "mgmt/hawkbit.h"
 #include "hawkbit_firmware.h"
 
+#include <pm/pm.h>
+
 #include "mbedtls/md.h"
 
 #if defined(CONFIG_NET_SOCKETS_SOCKOPT_TLS) || defined(CONFIG_NET_SOCKETS_OFFLOAD_TLS)
@@ -587,7 +589,7 @@ int hawkbit_init(void)
 	int32_t action_id;
 
 	fs.flash_device = device_get_binding(PM_SETTINGS_STORAGE_DEV_NAME);
-	if (!device_is_ready(flash_dev)) {
+	if (!device_is_ready(fs.flash_device)) {
 		LOG_ERR("Flash device not ready");
 		return -ENODEV;
 	}
@@ -805,13 +807,9 @@ static void response_cb(struct http_response *rsp, enum http_final_call final_da
 			hb_context.dl.http_content_size = rsp->content_length;
 		}
 
-		if (body_data != NULL) {
-			ret = mbedtls_md_update(&hb_context.dl.hash_ctx, body_data, body_len);
-			if (ret != 0) {
-				LOG_ERR("mbedTLS md update error: %d", ret);
-				hb_context.code_status = HAWKBIT_DOWNLOAD_ERROR;
-				break;
-			}
+		if (rsp->body_found) {
+			body_data = rsp->body_frag_start;
+			body_len = rsp->body_frag_len;
 
 			ret = flash_img_buffered_write(&hb_context.flash_ctx, body_data, body_len,
 						       final_data == HTTP_DATA_FINAL);
@@ -843,40 +841,15 @@ static void response_cb(struct http_response *rsp, enum http_final_call final_da
 		}
 
 		if (hb_context.dl.http_content_size == 0) {
-			body_data = rsp->body_start;
-			body_len = rsp->data_len;
-			/*
-			 * subtract the size of the HTTP header from body_len
-			 */
-			body_len -= (rsp->body_start - rsp->recv_buf);
 			hb_context.dl.http_content_size = rsp->content_length;
-		} else {
-			/*
-			 * more general case where body data is set, but no need
-			 * to take the HTTP header into account
-			 */
-			body_data = rsp->body_start;
-			body_len = rsp->data_len;
 		}
 
-		if ((rsp->body_found == 1) && (body_data == NULL)) {
-			body_data = rsp->recv_buf;
-			body_len = rsp->data_len;
-		}
-
-		LOG_DBG("Downloaded %d bytes", hb_context.dl.downloaded_size);
-		LOG_DBG("Content_lenght: %d", body_len);
-
-		if (body_data != NULL) {
-			ret = mbedtls_md_update(&hb_context.dl.hash_ctx, body_data, body_len);
-			if (ret != 0) {
-				LOG_ERR("mbedTLS md update error: %d", ret);
-				hb_context.code_status = HAWKBIT_DOWNLOAD_ERROR;
-				break;
-			}
+		if (rsp->body_found) {
+			body_data = rsp->body_frag_start;
+			body_len = rsp->body_frag_len;
 
 			ret = flash_img_buffered_write(&hb_context.flash_ctx, body_data, body_len,
-						       (hb_context.dl.downloaded_size + body_len) >=
+						        (hb_context.dl.downloaded_size + body_len) >=
 							       hb_context.dl.firmware_size &&
 							       final_data == HTTP_DATA_FINAL);
 			if (ret < 0) {
@@ -885,6 +858,9 @@ static void response_cb(struct http_response *rsp, enum http_final_call final_da
 				break;
 			}
 		}
+
+		LOG_DBG("Downloaded %d bytes", hb_context.dl.downloaded_size);
+		LOG_DBG("Content_lenght: %d", body_len);
 
 		hb_context.dl.downloaded_size += body_len;
 
