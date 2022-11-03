@@ -578,7 +578,7 @@ int hawkbit_init(void)
 	struct flash_pages_info info;
 	int32_t action_id;
 
-	fs.flash_device = device_get_binding(PM_SETTINGS_STORAGE_DEV_NAME);
+	fs.flash_device = DEVICE_DT_GET(PM_SETTINGS_STORAGE_DEV);
 	if (!device_is_ready(fs.flash_device)) {
 		LOG_ERR("Flash device not ready");
 		return -ENODEV;
